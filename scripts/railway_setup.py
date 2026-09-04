@@ -14,7 +14,7 @@ API_URL = "https://backboard.railway.com/graphql/v2"
 TARGET_PORT = 8080
 RETRIES = max(1, int(os.environ.get("RAILWAY_API_RETRIES", "3")))
 DELAY = max(1.0, float(os.environ.get("RAILWAY_API_RETRY_DELAY", "2.5")))
-PROJECT_TOKEN = os.environ.get("RAILWAY_TOKEN", "").strip()
+RAILWAY_TOKEN = os.environ.get("RAILWAY_TOKEN", "").strip()
 ACCOUNT_TOKEN = os.environ.get("RAILWAY_API_TOKEN", "").strip()
 PROJECT_ID = os.environ.get("RAILWAY_PROJECT_ID", "").strip()
 ENVIRONMENT_ID = os.environ.get("RAILWAY_ENVIRONMENT_ID", "").strip()
@@ -42,7 +42,7 @@ def runtime_endpoints_complete():
 
 
 def request_once(query, variables, mode, token):
-    headers = {"Content-Type": "application/json", "User-Agent": "railway-universal-stable/5.7"}
+    headers = {"Content-Type": "application/json", "User-Agent": "railway-universal-stable/5.8"}
     if mode == "project":
         headers["Project-Access-Token"] = token
     else:
@@ -84,34 +84,59 @@ def request(query, variables, mode, token):
 
 def gql(query, variables=None):
     errors = []
-    if PROJECT_TOKEN:
+
+    # Compatibility path: RAILWAY_TOKEN may be the account/workspace-style token
+    # historically used by this project. Railway authenticates those with Bearer.
+    # If it is instead a true project token, the Project-Access-Token fallback below
+    # remains available. This keeps both token forms compatible without weakening scope.
+    if RAILWAY_TOKEN:
         try:
-            return request(query, variables, "project", PROJECT_TOKEN)
+            data = request(query, variables, "bearer", RAILWAY_TOKEN)
+            print("RAILWAY_API_AUTH=RAILWAY_TOKEN_BEARER")
+            return data
         except ApiError as exc:
             errors.append(exc)
             if exc.auth:
-                print("RAILWAY_API_PROJECT_TOKEN=REJECTED", file=sys.stderr)
-    if ACCOUNT_TOKEN and ACCOUNT_TOKEN != PROJECT_TOKEN:
+                print("RAILWAY_API_RAILWAY_TOKEN_BEARER=REJECTED", file=sys.stderr)
+
+        try:
+            data = request(query, variables, "project", RAILWAY_TOKEN)
+            print("RAILWAY_API_AUTH=RAILWAY_TOKEN_PROJECT")
+            return data
+        except ApiError as exc:
+            errors.append(exc)
+            if exc.auth:
+                print("RAILWAY_API_RAILWAY_TOKEN_PROJECT=REJECTED", file=sys.stderr)
+
+    if ACCOUNT_TOKEN and ACCOUNT_TOKEN != RAILWAY_TOKEN:
         try:
             data = request(query, variables, "bearer", ACCOUNT_TOKEN)
             print("RAILWAY_API_AUTH=BEARER_FALLBACK")
             return data
         except ApiError as exc:
             errors.append(exc)
+
     raise errors[-1] if errors else ApiError("no Railway token")
 
 
 def resolve_ids():
     global PROJECT_ID, ENVIRONMENT_ID, SERVICE_ID
+
+    # Railway injects these IDs into the running service. Prefer them so a
+    # workspace/account-style RAILWAY_TOKEN never needs the projectToken query.
     if not PROJECT_ID or not ENVIRONMENT_ID:
-        if not PROJECT_TOKEN:
-            raise ApiError("project/environment IDs unavailable for account-token-only mode")
-        data = gql("query { projectToken { projectId environmentId } }")
-        info = data.get("projectToken") or {}
-        PROJECT_ID = PROJECT_ID or str(info.get("projectId", ""))
-        ENVIRONMENT_ID = ENVIRONMENT_ID or str(info.get("environmentId", ""))
+        try:
+            data = gql("query { projectToken { projectId environmentId } }")
+            info = data.get("projectToken") or {}
+            PROJECT_ID = PROJECT_ID or str(info.get("projectId", ""))
+            ENVIRONMENT_ID = ENVIRONMENT_ID or str(info.get("environmentId", ""))
+        except ApiError as exc:
+            if not PROJECT_ID or not ENVIRONMENT_ID:
+                raise ApiError(f"unable to resolve Railway project/environment ID: {exc}")
+
     if not PROJECT_ID or not ENVIRONMENT_ID:
         raise ApiError("unable to resolve Railway project/environment ID")
+
     if not SERVICE_ID:
         data = gql("query($id:String!){ project(id:$id){ services{edges{node{id name}}} } }", {"id": PROJECT_ID})
         services = (((data.get("project") or {}).get("services") or {}).get("edges") or [])
@@ -182,7 +207,7 @@ def ensure_tcp_proxy():
 
 
 def setup():
-    if not PROJECT_TOKEN and not ACCOUNT_TOKEN:
+    if not RAILWAY_TOKEN and not ACCOUNT_TOKEN:
         print("RAILWAY_API_SETUP=SKIP reason=no_token")
         return 0
     resolve_ids()
