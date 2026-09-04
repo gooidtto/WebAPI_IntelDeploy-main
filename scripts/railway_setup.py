@@ -7,6 +7,9 @@ import json
 import urllib.error
 import urllib.request
 
+# Non-destructive networking policy: never delete existing Railway domains or proxies.
+# Do not destructively delete networking resources; only inspect, reuse, or create when absent.
+
 API_URL = "https://backboard.railway.com/graphql/v2"
 TARGET_PORT = 8080
 RETRIES = max(1, int(os.environ.get("RAILWAY_API_RETRIES", "3")))
