@@ -2,24 +2,99 @@
 
 这是一个面向 Railway 的 Xray 稳定部署项目。核心原则：**节点身份只初始化一次，之后永久复用；运行时网络 endpoint 随当前 Deployment 重新发现。**
 
-## 1. 部署要求
+<a href="https://railway.com/new/template?referralCode=generic&utm_medium=integration&utm_source=button&utm_campaign=WebAPI_IntelDeploy-main">
+  <img src="https://railway.com/button.svg" alt="Deploy on Railway" />
+</a>
 
-1. 将 GitHub 仓库连接到 Railway Service。
-2. Service 使用仓库中的 `Dockerfile`。
-3. 在 **Service → Volumes** 创建 Persistent Volume，并将 Mount Path 固定为 `/data`。
-4. 在 **Service → Variables** 设置 `RAILWAY_TOKEN`。
-5. Deploy。
-6. 首次启动验证 `/data` 为真实 Persistent Volume；仅当 Volume 全新且为空时初始化 UUID、REALITY key、3 个 Short IDs 和 subscription token，并原子写入 `/data`。
-7. 程序自动检查/创建当前 Deployment 所需的 Public Domain 与 TCP Proxy（Target `8080`）；仅执行非破坏性检查、复用或创建，不删除现有网络资源。
-8. 后续 Restart / Redeploy / Container recreation 从 `/data` 读取并复用同一套节点身份；runtime manifest、订阅内容和 Railway endpoint 根据当前 Deployment 环境重新生成。
+> 说明：Railway 官方的 Deploy on Railway 按钮用于发布/分享 Railway Template。当前仓库未配置可直接引用的 Railway Template ID，因此按钮进入 Railway 新建流程；正式使用时也可以直接按下面的 GitHub 部署流程连接本仓库。citeturn843186search0
 
-**Persistent Volume 必须在首次正式 Deploy 前完成挂载。** 缺少 Volume、身份不完整或身份完整性校验失败时，程序拒绝生成临时/替代身份。
+## 🚀 最简部署流程
 
-## 2. 当前节点架构
+### 1. GitHub → Railway
+
+在 Railway 中选择 **New Project → Deploy from GitHub Repo**，连接 GitHub 后选择：
+
+`gooidtto/WebAPI_IntelDeploy-main`
+
+Railway 支持将 GitHub Repository 直接作为 Service Source；检测到仓库中的 `Dockerfile` 后会使用 Dockerfile 构建。citeturn843186search1turn843186search6
+
+### 2. 创建 Persistent Volume
+
+进入 Railway Service：
+
+**Service → Volumes → Add Volume**
+
+挂载路径固定：
+
+```text
+/data
+```
+
+**首次正式 Deploy 前必须完成 `/data` 挂载。** 不要删除该 Volume，否则无法继续复用原节点身份。
+
+### 3. 设置 Railway Token
+
+进入：
+
+**Service → Variables**
+
+设置：
+
+```text
+RAILWAY_TOKEN=<你的 Railway Token>
+```
+
+该变量用于 Railway API 网络资源 bootstrap。程序兼容常见 Railway Token 认证方式。
+
+### 4. Deploy
+
+点击 **Deploy**。
+
+首次启动时，程序会在 `/data` 中初始化：
+
+- UUID
+- REALITY private/public key
+- 3 个 REALITY Short IDs
+- Subscription Token
+
+之后的 **Restart / Redeploy / Container recreation** 会自动从 `/data` 复用同一身份，不重新生成。
+
+Railway 官方的 GitHub 部署流程也是创建项目、选择 GitHub Repository，然后 Deploy；代码更新后，连接的 GitHub 分支可以自动触发新的构建和部署。citeturn843186search1turn843186search6
+
+## ✅ 部署完成检查
+
+正常情况下日志应出现：
+
+```text
+PERSISTENT_VOLUME_MOUNT=PASS
+NODE_IDENTITY=INITIALIZED
+```
+
+首次初始化完成后，再次 Restart / Redeploy 应出现：
+
+```text
+PERSISTENT_VOLUME_MOUNT=PASS
+NODE_IDENTITY=REUSED
+NODE_IDENTITY_FINGERPRINT=<same fingerprint>
+```
+
+网络与订阅正常时应最终通过：
+
+```text
+RAILWAY_NETWORK_DISCOVERY=READY
+GATEWAY_BIND_EARLY=PASS
+HEALTH_ENDPOINT=PASS
+SUBSCRIPTION_TOKEN_SEALED=PASS
+SUBSCRIPTION_HTTP_LOCAL=PASS
+SUBSCRIPTION_ENDPOINT_CONTRACT=PASS
+SUBSCRIPTION_CONTRACT=PASS
+```
+
+## 🌐 节点与订阅
 
 正常运行时为 5 个节点：
 
-| 节点 | 协议 | 传输 | 安全 | Endpoint 来源 |
+| 节点 | 协议 | 传输 | 安全 | Endpoint |
 |---|---|---|---|---|
 | Node 01 | VLESS | XHTTP | TLS | Railway Public Domain :443 |
 | Node 02 | VLESS | WebSocket | TLS | Railway Public Domain :443 |
@@ -27,85 +102,90 @@
 | Node 04 | VLESS | XHTTP | REALITY | Railway TCP Proxy |
 | Node 05 | VLESS | gRPC | REALITY | Railway TCP Proxy |
 
-Cloudflare Tunnel + VLESS XHTTP TLS 保留为**可选 Node 06**；未启用时不计入运行节点数量。
+Cloudflare Tunnel + VLESS XHTTP TLS 为**可选 Node 06**。
 
-当前 Gateway 监听 `:8080`，TCP Proxy Target 固定为 `8080`，并按 REALITY 节点将流量路由到 Xray 内部端口 `10087`、`10088`、`10089`。
+Gateway 监听：
 
-## 3. 永久身份策略
+```text
+:8080
+```
 
-节点身份唯一持久来源为 `/data`：
+TCP Proxy Target 固定：
 
-- `uuid.txt`
-- `reality_private_key.txt`
-- `reality_public_key.txt`
-- `reality_short_ids.json`
-- `subscription_token.txt`
-- `identity-integrity.json`
-- `.node-identity-initialized`
+```text
+8080
+```
 
-策略固定为 **`INITIALIZE_ONCE_REUSE_FOREVER`**：
-
-- **全新空 Persistent Volume**：初始化一次。
-- **已初始化且完整有效、完整性校验通过**：输出 `NODE_IDENTITY=REUSED`。
-- **已初始化但身份文件缺失、损坏、不完整或完整性校验失败**：拒绝启动，**绝不生成新身份**。
-- **未挂载 Persistent Volume**：拒绝启动，**绝不生成临时身份**。
-- `generate.py` 只读取持久身份中的 Short IDs 和 subscription token，不负责生成身份。
-
-`identity-integrity.json` 保存身份文件的 SHA-256 完整性封印，用于阻止被人为修改的 UUID、REALITY key、Short ID 或 subscription token 被静默当成原身份继续运行。
-
-## 4. Subscription Token 与 URL
-
-Subscription Token 持久保存在 `/data/subscription_token.txt`，不会因为 Redeploy、Restart 或 Railway endpoint 变化而自动更换。
-
-订阅 URL 使用当前 Railway Public Domain 与持久 Token 组合生成：
+Subscription URL 使用当前 Railway Public Domain + 持久 Token：
 
 ```text
 https://<current-public-domain>/sub/<subscription-token>
 ```
 
-`/data/subscription_url.txt` 是当前运行时生成的派生文件，不是身份来源。Railway Public Domain 变化后，程序重新生成 URL；Token 保持不变。
+Railway endpoint 变化时，运行时节点配置和 Subscription 会重新生成；持久身份不变。
 
-如需**主动轮换 Token**，使用环境变量：
+## 🔐 永久身份规则
+
+身份唯一持久来源：`/data`
+
+```text
+/data/uuid.txt
+/data/reality_private_key.txt
+/data/reality_public_key.txt
+/data/reality_short_ids.json
+/data/subscription_token.txt
+/data/identity-integrity.json
+/data/.node-identity-initialized
+```
+
+策略固定：
+
+```text
+INITIALIZE_ONCE_REUSE_FOREVER
+```
+
+已初始化且完整性校验通过 → `NODE_IDENTITY=REUSED`。
+
+已初始化但身份缺失、损坏、不完整或封印校验失败 → **fail closed**，绝不生成替代身份。
+
+未挂载真实 Persistent Volume → **fail closed**，绝不生成临时身份。
+
+## 🔄 Subscription Token 主动轮换
+
+默认不轮换 Token。
+
+如需手动轮换，在 Railway Variables 增加：
 
 ```text
 SUBSCRIPTION_TOKEN_ROTATE_ID=YYYYMMDD-NNN
 ```
 
-例如：`20260904-001`。相同 Rotation ID 不会重复轮换；非法 Rotation ID 直接 fail closed，且不修改身份。轮换只替换 subscription token，并重新封印身份完整性；UUID、REALITY key、Short IDs 保持不变。
-
-## 5. Railway 网络与认证
-
-`RAILWAY_TOKEN` 仅用于 Railway API 网络资源 bootstrap。当前认证逻辑兼容两种常见用法：优先尝试 `Authorization: Bearer`，失败后再尝试 `Project-Access-Token`；如存在独立 `RAILWAY_API_TOKEN`，可作为 Bearer fallback。
-
-网络资源遵循非破坏性原则：
-
-- 不删除现有 Public Domain。
-- 不删除现有 TCP Proxy。
-- 不清空或替换用户已有网络资源。
-- 只检查、复用或在缺失时创建所需资源。
-- TCP Proxy Target 必须为 `8080`。
-- Railway API 暂时不可用时，在已有完整运行时 endpoint 条件满足的情况下可继续使用当前 endpoint；不会因此重新生成节点身份。
-
-## 6. 启动与故障恢复
-
-主进程由 `boot.sh` 直接运行。启动顺序：
+示例：
 
 ```text
-identity preflight
-→ Gateway :8080
-→ Railway networking reconciliation
-→ runtime discovery
-→ runtime / subscription generation
-→ Xray
-→ optional Cloudflare Tunnel
-→ readiness
+SUBSCRIPTION_TOKEN_ROTATE_ID=20260904-001
 ```
 
-Gateway 或 Xray 主进程异常退出时，容器以失败状态结束，由 Railway `ON_FAILURE` 负责容器级恢复。重新启动后仍从 `/data` 复用同一身份。
+规则：
 
-Railway healthcheck 使用 `/health` 作为早期 liveness 检查；`boot.sh` 在完成 runtime、subscription 和 Xray readiness 检查后保持主进程运行。
+- 未设置或为空：不轮换。
+- 相同 Rotation ID：不会重复轮换。
+- 新 Rotation ID：只轮换 Subscription Token。
+- UUID、REALITY Key、Short IDs 不变。
+- 非法 Rotation ID：fail closed，不修改身份。
 
-## 7. 仓库结构
+## 🛡️ Railway 网络策略
+
+程序对 Railway 网络资源执行非破坏性处理：
+
+- 不删除已有 Public Domain。
+- 不删除已有 TCP Proxy。
+- 优先检查并复用现有资源。
+- 缺失时才创建所需资源。
+- TCP Proxy Target 必须为 `8080`。
+- Railway API 暂时不可用时，只要当前 runtime endpoint 完整，仍可继续使用当前 endpoint。
+
+## 📦 当前仓库结构
 
 ```text
 .
@@ -132,73 +212,33 @@ Railway healthcheck 使用 `/health` 作为早期 liveness 检查；`boot.sh` �
     └── index.html
 ```
 
-生成的 Python `__pycache__`、`.pyc` 等构建/本地缓存不得进入 Git 仓库。当前架构不使用第二层 shell supervisor；Railway 原生 `ON_FAILURE` 负责容器级恢复。
+## 🔧 稳定性原则
 
-## 8. 构建保护
+- Xray 版本固定，不自动漂移。
+- 永久身份只存储在 `/data`。
+- Runtime endpoint 不写入永久身份。
+- Railway 网络配置不做破坏性删除。
+- Railway API 短暂失败执行重试。
+- 身份异常时 fail closed。
+- `generate.py` / `boot.sh` 不在运行时重新生成永久节点身份。
+- Git 仓库不保存 UUID、REALITY Key、Short IDs 或 Subscription Token。
 
-Docker build 阶段强制检查：
+## 📋 常用操作
 
-- Xray 版本 `26.3.27` 与镜像 digest 固定；
-- Python 脚本可编译；
-- Persistent Volume guard、身份复用、fail-closed、integrity seal 存在；
-- `boot.sh` 必须先执行身份初始化；
-- Short IDs 必须从持久身份读取；
-- Subscription Token 必须受完整性封印保护；
-- subscription URL 必须生成并经过 runtime guard；
-- Railway Public Domain / TCP Proxy 执行数量与 Target `8080` invariant 检查；
-- Railway networking 必须保持非破坏性；
-- WS transport 作为 Node 02 正式启用；
-- Cloudflare Node 06 仅在明确启用时运行；
-- `generate.py` 与 `boot.sh` 禁止在运行时重新生成永久节点身份。
+**首次部署**：挂载 `/data` → 设置 `RAILWAY_TOKEN` → Deploy。
 
-## 9. 验收标准
+**普通更新**：推送 GitHub 新代码 → Railway 自动构建/部署，或手动 Redeploy。citeturn843186search6turn843186search3
 
-首次部署：
+**普通重启**：Restart，节点身份自动复用。
 
-```text
-PERSISTENT_VOLUME=/data
-PERSISTENT_VOLUME_MOUNT=PASS
-NODE_IDENTITY=INITIALIZED
-NODE_IDENTITY_FINGERPRINT=<fingerprint>
-```
+**查看部署日志**：进入 Railway Deployment → View Logs。Railway 提供 Deployment 状态和日志查看入口。citeturn843186search4
 
-后续 Restart / Redeploy：
+**Token 轮换**：修改 `SUBSCRIPTION_TOKEN_ROTATE_ID` 为新的合法值，然后 Redeploy。
 
-```text
-PERSISTENT_VOLUME=/data
-PERSISTENT_VOLUME_MOUNT=PASS
-NODE_IDENTITY=REUSED
-NODE_IDENTITY_FINGERPRINT=<same fingerprint>
-```
+## ⚠️ 重要
 
-正常网络 bootstrap：
+不要删除 `/data` Persistent Volume。删除后，程序无法继续证明原身份的完整性，也不会偷偷生成新身份。
 
-```text
-RAILWAY_API_SETUP=CHECK
-RAILWAY_API_AUTH=RAILWAY_TOKEN_BEARER
-RAILWAY_API_PUBLIC_DOMAIN=EXISTS_OR_CONFIGURED
-RAILWAY_API_TCP_PROXY=EXISTS target=8080
-RAILWAY_API_SETUP=READY
-NETWORKING_STATE=READY
-```
+不要把真实 Token、UUID、REALITY private key 写进 README、GitHub Issues 或 Git 仓库。
 
-订阅契约应最终通过：
-
-```text
-SUBSCRIPTION_TOKEN_SEALED=PASS
-SUBSCRIPTION_HTTP_LOCAL=PASS
-SUBSCRIPTION_ENDPOINT_CONTRACT=PASS
-SUBSCRIPTION_CONTRACT=PASS
-```
-
-同一 Persistent Volume 的 identity fingerprint 必须保持不变；endpoint fingerprint 可以随 Railway Deployment 网络变化而变化。
-
-## 10. 生产原则
-
-- 不删除或清空 `/data`，除非明确执行一次全新节点初始化。
-- 不把 UUID、REALITY key、Short IDs 或 subscription token 写入 Git 仓库。
-- 不在运行时重新生成永久节点身份。
-- 不把 Railway endpoint 固化进身份文件。
-- 不删除或破坏用户已有 Railway Public Domain / TCP Proxy。
-- 不修改 Railway 国家/地区、Cloudflare 配置或其他用户未授权设置。
-- Xray 版本保持固定，除非明确执行一次经过验证的版本升级。
+不要为了普通 Redeploy 手动修改 UUID、REALITY Key、Short IDs 或 Subscription Token。
